@@ -1,42 +1,10 @@
 # `pl-hot`
 
-Python library for the HOT **parking-lot segmenter** on fAIr. It owns the model logic — RGB chip preprocessing, ONNX mask decode, polygonize / clean, georeferencing, GeoJSON output, and SegFormer train/export helpers — so the fAIr model pack (`fAIr-models/models/<segformer_parking>/`) stays a thin STAC/ZenML/Docker adapter.
+Python library for the HOT **parking-lot segmenter** on fAIr. It owns the model logic — RGB chip preprocessing, ONNX mask decode, polygon cleanup, georeferencing, GeoJSON output, and SegFormer train/export helpers — so the fAIr model pack stays a thin STAC/ZenML/Docker adapter.
 
-This README is the **implementation contract** (same role as [`spd-hot`](https://github.com/AbdelrahmanKatkat/spd-hot)). `pl-hot` now ships the core inference, training, evaluation, export, and validation utilities described below. Do not put ZenML, STAC, or Docker orchestration in this library.
+This README is the **implementation contract**. Do not put ZenML, STAC, or Docker orchestration in this library. Architecture and metric theory live in [`model/model.md`](model/model.md).
 
-**Repo:** [AbdelrahmanKatkat/pl-hot](https://github.com/AbdelrahmanKatkat/pl-hot)  
 **Python:** ≥ 3.12
-
----
-
-## Theory first: why this is not a copy of `spd-hot`
-
-`spd-hot` wraps **YOLO object detection**. One forward pass returns boxes. Postprocess is threshold + NMS + bbox → polygon.
-
-`pl-hot` wraps **semantic segmentation**. One forward pass returns a **per-pixel** parking / not-parking map. There is no NMS and no class-box tensor. Postprocess is:
-
-1. logits → binary mask
-2. mask → polygons
-3. polygon cleanup (holes, simplify)
-4. chip pixels → EPSG:4326 GeoJSON
-
-That is the same *family* as fAIr `unet_segmentation` and `dinov3s_buildings`, not `yolo11m_swimming_pools`. Reuse the **library shape** from `spd-hot` (params / preprocess / decode / georef / postprocess / serve / train / export). Replace every YOLO-specific step.
-
-| Question | Swimming pools (`spd-hot`) | Parking lots (`pl-hot`) |
-| --- | --- | --- |
-| fAIr task | `object-detection` | `semantic-segmentation` |
-| Head | YOLO11m boxes | SegFormer per-pixel logits |
-| Native tile | often 256, model 640 | paper tiles **512×512**, OAM chips often 256 → resize to 512 |
-| ONNX input | `(1, 3, 640, 640)` NCHW `[0, 1]` | `(1, 3, 512, 512)` NCHW; **ImageNet mean/std** (verify from checkpoint) |
-| ONNX output | `(1, 4+nc, anchors)` | `(1, 1, 512, 512)` or `(1, 2, 512, 512)` logits |
-| Decode | conf + NMS → xyxy | sigmoid / softmax → binary mask |
-| Vectorize | bbox corners | `rasterio.features.shapes` on the mask |
-| Cleanup | min box area | fill holes, simplify edges; optional building/road subtract |
-| Train labels | GeoJSON → YOLO `.txt` | GeoJSON → raster mask (or PNG mask pairs) |
-| Train stack | Ultralytics | Hugging Face SegFormer / the published `.ckpt` |
-| Inference image | CPU `onnxruntime` | CPU `onnxruntime` (no Transformers) |
-
-fAIr only accepts **3-band RGB** chips and **vector** output ([contributing/model.md](https://github.com/hotosm/fAIr-models/blob/develop/docs/contributing/model.md)). The paper’s RGB+NIR gain is real, but **NIR is out of scope** for the fAIr pack. Train and serve the **RGB** checkpoint.
 
 ---
 
@@ -123,7 +91,7 @@ evaluate_segformer()           PW + mIoU → fAIr metric names ("accuracy", "mea
 export_onnx_bytes()            validated ONNX for promotion
 ```
 
-Do **not** convert labels to YOLO `.txt`. That is detection-only.
+Labels stay polygons rasterized onto chips. Do not convert them to detection box files.
 
 ---
 
@@ -133,8 +101,8 @@ Do **not** convert labels to YOLO `.txt`. That is detection-only.
 
 **Why these steps**
 
-- fAIr chips are 3-band GeoTIFFs. The paper trains on 512×512 RGB. OAM chips are often 256×256, so resize (square → square, **no letterbox**), same idea as `spd-hot` 256→640.
-- Hugging Face SegFormer is almost always trained with **ImageNet** mean `[0.485, 0.456, 0.406]` and std `[0.229, 0.224, 0.225]` on float `[0, 1]`. YOLO’s “divide by 255 only” will shift this model. Confirm against the checkpoint / training script; if the ckpt used `/255` only, set `imagenet_norm=False`.
+- fAIr chips are 3-band GeoTIFFs. The paper trains on 512×512 RGB. OAM chips are often 256×256, so resize square → square (**no letterbox**).
+- Hugging Face SegFormer is almost always trained with **ImageNet** mean `[0.485, 0.456, 0.406]` and std `[0.229, 0.224, 0.225]` on float `[0, 1]`. Divide-by-255 only will shift this model. If a checkpoint used `/255` only, set `imagenet_norm=False`.
 - Tensor layout is **NCHW** for ONNX Runtime.
 
 **Steps**
@@ -145,7 +113,7 @@ Do **not** convert labels to YOLO `.txt`. That is detection-only.
 4. If `imagenet_norm=True`, subtract mean / divide std per channel.
 5. Return `(1, 3, 512, 512)`.
 
-**Metadata (`PreprocessMeta`)** — same fields as `spd-hot`:
+**Metadata (`PreprocessMeta`)**:
 
 | Field | Use |
 | --- | --- |
@@ -159,7 +127,7 @@ Do **not** convert labels to YOLO `.txt`. That is detection-only.
 
 ## Postprocess
 
-Split decode (model space) from georef (map space), like `spd-hot`.
+Split decode (model space) from georef (map space).
 
 ### Decode (`pl_hot.decode`)
 
@@ -170,14 +138,14 @@ Split decode (model space) from georef (map space), like `spd-hot`.
 - Two-class: `argmax` or parking-channel softmax > threshold.
 - Return a `uint8` mask at **model** resolution (`1` = parking).
 
-No NMS. No Ultralytics.
+This is per-pixel segmentation: no NMS, no boxes.
 
 ### Georef + GeoJSON (`pl_hot.postprocess` + `pl_hot.georef`)
 
 `mask_to_feature_collection(mask, meta, cfg)`:
 
 1. **Unscale** the mask to original chip size (nearest-neighbour).
-2. `rasterio.features.shapes` → polygons in chip CRS (same idea as `unet_segmentation` / `dinov3_hot.postprocess.vectorize_binary_mask`).
+2. `rasterio.features.shapes` → polygons in chip CRS.
 3. Paper cleanup ([WACV 2025 §4.2](https://openaccess.thecvf.com/content/WACV2025/papers/Qiam_A_Pipeline_and_NIR-Enhanced_Dataset_for_Parking_Lot_Segmentation_WACV_2025_paper.pdf)):
    - **Fill / drop holes** smaller than **60 m²** (interior rings and tiny blobs).
    - **Douglas–Peucker** simplify (parking edges are simple; raw masks are noisy).
@@ -202,7 +170,7 @@ No NMS. No Ultralytics.
 | `SplitParams` | `val_ratio`, `split_seed`, `block_size` | 0.1 (paper 90/10), 42, 4 |
 | `TrainParams` | `epochs`, `batch_size`, `learning_rate`, `weight_decay`, `pos_weight`, `early_stop_patience`, `freeze_encoder`, `sample_fraction`, `device` | 20, 4, 1e-5, 0.0, 4.76, 10, true, 1.0, `cpu` |
 
-fAIr passes STAC dicts; `parse_*` applies defaults. `device` is `"0"` / `"cuda"` when `torch.cuda.is_available()`, else `"cpu"` — same rule as the swimming-pool pack. Inference never reads `device`.
+fAIr passes STAC dicts; `parse_*` applies defaults. `device` is `"0"` / `"cuda"` when `torch.cuda.is_available()`, else `"cpu"`. Inference never reads `device`.
 
 Map metrics to fAIr keys: PW → `fair:accuracy`, mIoU → `fair:mean_iou`.
 
@@ -240,7 +208,7 @@ Tests use synthetic GeoTIFFs and fake logits — no HF download.
 
 ## Dockerfile recommendation (fAIr pack, not this repo)
 
-Copy the swimming-pool **five-stage** layout. Change the training wheels to SegFormer, not Ultralytics.
+Use a **five-stage** image: builder → runtime (train), test, inference-builder → inference. Training installs SegFormer extras; the serve image does not.
 
 | Stage | What to install | Device |
 | --- | --- | --- |
@@ -250,7 +218,7 @@ Copy the swimming-pool **five-stage** layout. Change the training wheels to SegF
 
 Do **not** put `transformers` or Torch in the distroless inference image. Do **not** use `onnxruntime-gpu` for live serve.
 
-Expected size order of magnitude (from the pool pack): inference ~1.2 GB; CUDA training image ~5.5–7 GB after the cu126 wheel.
+Expected size order of magnitude: inference ~1.2 GB; CUDA training image ~5.5–7 GB after the cu126 wheel.
 
 STAC: `mlm:tasks=["semantic-segmentation"]`, `mlm:accelerator=cuda`, input shape `[-1, 3, 512, 512]`, class name `parking_lot`, keyword `parking_lot` (or `landuse`), geometry `polygon`.
 
@@ -288,7 +256,7 @@ Tile size 512 and ImageNet norm are not in the weight file. They come from the p
 
 ### MiT-B5 vs fAIr live inference
 
-fAIr does not ban B5. Live serve is **CPU ONNX** in a distroless image (same contract as `dinov3s_buildings`). B5 is larger than the paper’s MiT-B0 table row (~80M vs ~4M params), so KNative cold start and CPU latency will be higher. Plan STAC `fair:memory_request` / `fair:memory_limit` in the same band as dinov3s (several GiB), not a tiny YOLO box. Training stays CUDA when a GPU is visible.
+fAIr does not ban B5. Live serve is **CPU ONNX** in a distroless image. B5 is larger than the paper’s MiT-B0 table row (~80M vs ~4M params), so KNative cold start and CPU latency will be higher. Plan STAC `fair:memory_request` / `fair:memory_limit` in the several-GiB band. Training stays CUDA when a GPU is visible.
 
 ---
 
