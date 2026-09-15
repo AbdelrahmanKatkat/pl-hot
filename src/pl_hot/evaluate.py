@@ -1,4 +1,9 @@
-"""Evaluation helpers for parking-lot segmentation."""
+"""Evaluation helpers for parking-lot segmentation.
+
+Metrics follow the WACV 2025 paper names (PW, mIoU) with dataset-level
+(micro) aggregation used by MMSegmentation / Cityscapes, not a mean of
+per-chip scores.
+"""
 
 from pathlib import Path
 from typing import Any
@@ -11,46 +16,77 @@ from .params import PreprocessParams
 from .preprocess import preprocess_chip_for_onnx
 
 
-def _binary_iou(pred: np.ndarray, truth: np.ndarray) -> float:
-    inter = float(np.logical_and(pred, truth).sum())
-    union = float(np.logical_or(pred, truth).sum())
-    return 1.0 if union == 0.0 else inter / union
+def _confusion(pred_fg: np.ndarray, truth_fg: np.ndarray) -> tuple[int, int, int, int]:
+    """Return (tp, tn, fp, fn) for the parking (foreground) class."""
+    pred_fg = pred_fg.astype(bool)
+    truth_fg = truth_fg.astype(bool)
+    tp = int(np.logical_and(pred_fg, truth_fg).sum())
+    tn = int(np.logical_and(~pred_fg, ~truth_fg).sum())
+    fp = int(np.logical_and(pred_fg, ~truth_fg).sum())
+    fn = int(np.logical_and(~pred_fg, truth_fg).sum())
+    return tp, tn, fp, fn
 
 
-def _class_ious(pred: np.ndarray, truth: np.ndarray) -> tuple[float, float]:
-    pred_fg = pred > 0
-    truth_fg = truth > 0
-    fg = _binary_iou(pred_fg, truth_fg)
-    bg = _binary_iou(~pred_fg, ~truth_fg)
-    return bg, fg
+def _iou(intersect: int, union: int) -> float:
+    if union == 0:
+        return float("nan")
+    return intersect / union
+
+
+def _metrics_from_confusion(tp: int, tn: int, fp: int, fn: int) -> dict[str, float]:
+    n = tp + tn + fp + fn
+    if n == 0:
+        raise ValueError("No pixels to evaluate")
+    iou_parking = _iou(tp, tp + fp + fn)
+    iou_background = _iou(tn, tn + fp + fn)
+    class_ious = [v for v in (iou_background, iou_parking) if not np.isnan(v)]
+    if not class_ious:
+        raise ValueError("All class unions are empty")
+    out: dict[str, float] = {
+        "accuracy": (tp + tn) / n,
+        "mean_iou": float(np.mean(class_ious)),
+    }
+    if not np.isnan(iou_background):
+        out["iou_background"] = iou_background
+    if not np.isnan(iou_parking):
+        out["iou_parking_lot"] = iou_parking
+    return out
 
 
 def evaluate_binary_masks(pred_masks_dir: str | Path, gt_masks_dir: str | Path) -> dict[str, float]:
+    """Dataset-level PW and 2-class mIoU from PNG mask folders.
+
+    Returns keys for `pipeline.py` `evaluate_model` → `log_evaluation_results`:
+    `accuracy`, `mean_iou`, and when defined `iou_background`, `iou_parking_lot`
+    (fAIr per-class IoU names from `classification:classes`).
+    """
     pred_dir = Path(pred_masks_dir)
     gt_dir = Path(gt_masks_dir)
     gt_files = sorted(gt_dir.glob("*.png"))
     if not gt_files:
         raise ValueError(f"No ground-truth masks found in {gt_dir}")
 
-    miou_per_chip: list[float] = []
-    accs: list[float] = []
+    tp = tn = fp = fn = 0
+    used = 0
     for gt in gt_files:
-        pred = pred_dir / gt.name
+        pred = pred_dir / gt.name # same name as the ground-truth mask
         if not pred.exists():
             continue
         gt_arr = np.asarray(Image.open(gt).convert("L")) > 0
         pr_arr = np.asarray(Image.open(pred).convert("L")) > 0
-        bg_iou, fg_iou = _class_ious(pr_arr, gt_arr)
-        miou_per_chip.append((bg_iou + fg_iou) / 2.0)
-        accs.append(float((pr_arr == gt_arr).mean()))
+        if pr_arr.shape != gt_arr.shape:
+            raise ValueError(f"Shape mismatch for {gt.name}: pred {pr_arr.shape} vs gt {gt_arr.shape}")
+        ctp, ctn, cfp, cfn = _confusion(pr_arr, gt_arr)
+        tp += ctp
+        tn += ctn
+        fp += cfp
+        fn += cfn
+        used += 1
 
-    if not miou_per_chip:
+    if used == 0:
         raise ValueError("No overlapping mask names between prediction and ground-truth dirs")
 
-    return {
-        "fair:accuracy": float(np.mean(accs)),
-        "fair:mean_iou": float(np.mean(miou_per_chip)),
-    }
+    return _metrics_from_confusion(tp, tn, fp, fn)
 
 
 def _require_torch() -> tuple[Any, Any]:
@@ -63,8 +99,11 @@ def _require_torch() -> tuple[Any, Any]:
 
 
 def _parking_logits_from_model_output(output: Any) -> np.ndarray:
+    """Return (1, 1, H, W) parking logits. ℓ_park − ℓ_bg ≡ softmax parking after sigmoid."""
     logits = output.logits if hasattr(output, "logits") else output
     logits_np = logits.detach().cpu().numpy() if hasattr(logits, "detach") else np.asarray(logits)
+    if logits_np.ndim != 4:
+        raise ValueError(f"Expected (B,C,H,W) logits, got {logits_np.shape}")
     if logits_np.shape[1] == 1:
         return logits_np
     if logits_np.shape[1] == 2:
@@ -80,7 +119,7 @@ def evaluate_segformer(
     threshold: float = 0.5,
     preprocess_cfg: PreprocessParams | None = None,
 ) -> dict[str, float]:
-    """Run model inference on chips and compute fAIr PW/mIoU metrics."""
+    """Run the torch model on chips and score **raw** pixel masks (no polygon postprocess)."""
     torch, F = _require_torch()
     model = model.eval()
     pp = preprocess_cfg or PreprocessParams()

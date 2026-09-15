@@ -18,7 +18,7 @@ def chips_dir(tmp_path: Path) -> Path:
         arr[0, 8:20, 8:20] = 200 + i
         arr[1, 8:20, 8:20] = 150
         arr[2, 8:20, 8:20] = 100
-        p = root / f"chip_{i}.tif"
+        p = root / f"OAM-{i:04d}-0000-18.tif"
         with rasterio.open(
             p,
             "w",

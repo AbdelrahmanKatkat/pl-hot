@@ -6,6 +6,7 @@ from typing import Any
 
 import numpy as np
 
+from .checkpoint import HF_SEGFORMER_B5, load_segformer_from_checkpoint
 from .params import PreprocessParams, TrainParams
 from .preprocess import preprocess_chip_for_onnx
 
@@ -86,9 +87,13 @@ def train_segformer(
     cfg: TrainParams,
     val_images_dir: str | Path | None = None,
     val_masks_dir: str | Path | None = None,
-    pretrained_model_name_or_path: str = "nvidia/segformer-b0-finetuned-ade-512-512",
+    pretrained_model_name_or_path: str = HF_SEGFORMER_B5,
+    checkpoint_path: str | Path | None = None,
 ) -> TrainResult:
-    """Fine-tune SegFormer on chip/mask pairs and return best model + history."""
+    """Fine-tune SegFormer-B5 on chip/mask pairs and return best model + history.
+
+    Pass `checkpoint_path` to start from the published Lightning `SegFormer_large_parking.ckpt`.
+    """
     torch, F, SegformerForSemanticSegmentation = _require_train_deps()
     device = "cpu" if cfg.device in {"cpu", ""} else cfg.device
     preprocess_cfg = PreprocessParams(model_input_size=cfg.model_input_size, normalize_01=True, imagenet_norm=True)
@@ -105,11 +110,14 @@ def train_segformer(
         val_ds = _SegDataset(val_images_dir, val_masks_dir, preprocess_cfg)
         val_loader = torch.utils.data.DataLoader(val_ds, batch_size=cfg.batch_size, shuffle=False)
 
-    model = SegformerForSemanticSegmentation.from_pretrained(
-        pretrained_model_name_or_path,
-        num_labels=2,
-        ignore_mismatched_sizes=True,
-    )
+    if checkpoint_path is not None:
+        model = load_segformer_from_checkpoint(checkpoint_path, hf_pretrained=pretrained_model_name_or_path)
+    else:
+        model = SegformerForSemanticSegmentation.from_pretrained(
+            pretrained_model_name_or_path,
+            num_labels=2,
+            ignore_mismatched_sizes=True,
+        )
     if cfg.freeze_encoder and hasattr(model, "segformer"):
         for p in model.segformer.parameters():
             p.requires_grad = False

@@ -1,0 +1,6 @@
+# Do not commit the ~1GB Lightning weights.
+*.ckpt
+*.pt
+*.pth
+*.onnx
+fair_models/parking_lot/pl-hot/model/model.md

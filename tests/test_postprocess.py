@@ -20,14 +20,14 @@ def test_mask_to_feature_collection_outputs_polygons() -> None:
     fc = mask_to_feature_collection(
         mask,
         meta,
-        PostprocessParams(mask_threshold=0.5, min_area_m2=1.0, hole_area_m2=1.0, simplify_m=0.0),
+        PostprocessParams(min_area_m2=1.0, hole_area_m2=1.0, simplify_m=0.0),
         source_name="chip.tif",
     )
     assert fc["type"] == "FeatureCollection"
     assert len(fc["features"]) == 1
     feature = fc["features"][0]
     assert feature["geometry"]["type"] in {"Polygon", "MultiPolygon"}
-    assert feature["properties"]["class_name"] == "parking"
+    assert feature["properties"]["class_name"] == "parking_lot"
 
 
 def test_confidence_uses_polygon_interior_mean() -> None:
@@ -47,7 +47,7 @@ def test_confidence_uses_polygon_interior_mean() -> None:
     fc = mask_to_feature_collection(
         mask,
         meta,
-        PostprocessParams(mask_threshold=0.5, min_area_m2=1.0, hole_area_m2=1.0, simplify_m=0.0),
+        PostprocessParams(min_area_m2=1.0, hole_area_m2=1.0, simplify_m=0.0),
         probability=prob,
     )
     conf = fc["features"][0]["properties"]["confidence"]

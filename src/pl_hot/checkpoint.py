@@ -1,15 +1,39 @@
-"""Checkpoint inspection helpers for SegFormer contract validation."""
+"""Read a Lightning/HF SegFormer `.ckpt` with `torch.load`.
 
-import json
+A `.ckpt` is not named `.zip`, but PyTorch Lightning saves it as a zip of pickle
++ tensor shards. Callers should use `torch.load`, not unzip it by hand.
+
+`inspect_checkpoint` returns what is in the file (encoder from key depths,
+channel counts from tensor shapes). Tile size 512 and ImageNet norm are not
+stored in the weight blob; those live in `HF_SEGFORMER_B5` / train defaults.
+"""
+
+from __future__ import annotations
+
+import re
 from pathlib import Path
 from typing import Any
+
+HF_SEGFORMER_B5 = "nvidia/segformer-b5-finetuned-ade-512-512"
+
+_BLOCK_RE = re.compile(r"(?:^|\.)(?:model\.)?segformer\.encoder\.block\.(\d+)\.(\d+)\.")
+_PATCH_PROJ = "segformer.encoder.patch_embeddings.0.proj.weight"
+_CLASSIFIER = "decode_head.classifier.weight"
+
+_DEPTHS_TO_VARIANT = {
+    (2, 2, 2, 2): "mit-b0-or-b1",
+    (3, 4, 6, 3): "mit-b2",
+    (3, 4, 18, 3): "mit-b3",
+    (3, 8, 27, 3): "mit-b4",
+    (3, 6, 40, 3): "mit-b5",
+}
 
 
 def _require_torch() -> Any:
     try:
         import torch
     except ImportError as exc:  # pragma: no cover
-        raise ImportError("Install pl-hot with `[train]` extras for checkpoint inspection.") from exc
+        raise ImportError("Install pl-hot with `[train]` extras to read checkpoints.") from exc
     return torch
 
 
@@ -21,90 +45,77 @@ def _state_dict_from_checkpoint(blob: Any) -> dict[str, Any]:
     raise ValueError("Unsupported checkpoint format")
 
 
-def _infer_encoder_variant(keys: list[str]) -> str | None:
-    joined = " ".join(keys).lower()
-    for name in ("mit_b0", "mit_b1", "mit_b2", "mit_b3", "mit_b4", "mit_b5"):
-        if name in joined:
-            return name
-    if "segformer.encoder" in joined or "segformer" in joined:
-        return "segformer-unknown-variant"
-    return None
+def _strip_prefix(key: str, prefix: str = "model.") -> str:
+    return key[len(prefix) :] if key.startswith(prefix) else key
 
 
-def _infer_input_channels(state: dict[str, Any]) -> int | None:
-    for key, value in state.items():
-        if not hasattr(value, "shape"):
+def encoder_variant_from_keys(keys: list[str]) -> str | None:
+    """Infer MiT variant from `segformer.encoder.block.{stage}.{idx}` keys."""
+    stages: dict[int, int] = {}
+    for key in keys:
+        match = _BLOCK_RE.search(key)
+        if match is None:
             continue
-        shape = tuple(value.shape)
-        if len(shape) == 4 and "weight" in key:
-            return int(shape[1])
+        stage, idx = int(match.group(1)), int(match.group(2))
+        stages[stage] = max(stages.get(stage, -1), idx)
+    if not stages:
+        joined = " ".join(keys).lower()
+        if "segformer.encoder" in joined or "segformer" in joined:
+            return "segformer-unknown-variant"
+        return None
+    depths = tuple(stages[i] + 1 for i in range(max(stages) + 1))
+    return _DEPTHS_TO_VARIANT.get(depths, f"mit-unknown-depths-{depths}")
+
+
+def _tensor_shape(state: dict[str, Any], suffix: str) -> tuple[int, ...] | None:
+    """Return `.shape` of the first tensor whose key ends with `suffix`."""
+    for key, value in state.items():
+        if key.endswith(suffix) or _strip_prefix(key).endswith(suffix):
+            if hasattr(value, "shape"):
+                return tuple(int(d) for d in value.shape)
     return None
 
 
-def _infer_output_channels(state: dict[str, Any]) -> int | None:
-    candidates = [k for k in state if k.endswith("classifier.weight") or "decode_head.classifier.weight" in k]
-    for key in candidates:
-        value = state[key]
-        if hasattr(value, "shape") and len(value.shape) >= 1:
-            return int(value.shape[0])
-    return None
-
-
-def _load_json(path: str | Path | None) -> dict[str, Any] | None:
-    if path is None:
-        return None
-    p = Path(path)
-    if not p.exists():
-        return None
-    return json.loads(p.read_text(encoding="utf-8"))
-
-
-def inspect_checkpoint_contract(
-    checkpoint_path: str | Path,
-    *,
-    preprocessor_config_path: str | Path | None = None,
-    model_config_path: str | Path | None = None,
-) -> dict[str, Any]:
-    """Collect the five README facts needed before freezing ONNX shapes."""
+def inspect_checkpoint(checkpoint_path: str | Path) -> dict[str, Any]:
+    """Load the ckpt and return encoder/channel facts from its tensors."""
     torch = _require_torch()
-    ckpt = torch.load(Path(checkpoint_path), map_location="cpu")
-    state = _state_dict_from_checkpoint(ckpt)
-    keys = list(state.keys())
-
-    model_cfg = _load_json(model_config_path)
-    pre_cfg = _load_json(preprocessor_config_path)
-
-    input_size = None
-    if isinstance(pre_cfg, dict):
-        size = pre_cfg.get("size")
-        if isinstance(size, dict):
-            input_size = size.get("height") or size.get("width")
-        elif isinstance(size, int):
-            input_size = size
-
-    image_mean = pre_cfg.get("image_mean") if isinstance(pre_cfg, dict) else None
-    image_std = pre_cfg.get("image_std") if isinstance(pre_cfg, dict) else None
-    normalization = "imagenet" if image_mean and image_std else "unknown"
-
-    facts = {
-        "checkpoint_path": str(checkpoint_path),
-        "encoder_variant": _infer_encoder_variant(keys),
-        "model_input_size": input_size,
-        "output_channels": _infer_output_channels(state),
-        "input_channels": _infer_input_channels(state),
-        "normalization": normalization,
-        "image_mean": image_mean,
-        "image_std": image_std,
+    path = Path(checkpoint_path)
+    blob = torch.load(path, map_location="cpu", weights_only=False)
+    state = _state_dict_from_checkpoint(blob)
+    in_shape = _tensor_shape(state, _PATCH_PROJ)
+    out_shape = _tensor_shape(state, _CLASSIFIER)
+    return {
+        "checkpoint_path": str(path.resolve()),
+        "encoder_variant": encoder_variant_from_keys(list(state.keys())),
+        "input_channels": int(in_shape[1]) if in_shape and len(in_shape) >= 2 else None,
+        "output_channels": int(out_shape[0]) if out_shape else None,
+        "patch_embed_shape": in_shape,
+        "classifier_shape": out_shape,
     }
 
-    warnings: list[str] = []
-    if facts["input_channels"] not in {3, None}:
-        warnings.append(f"Checkpoint expects {facts['input_channels']} input channels (fAIr requires RGB=3).")
-    if facts["output_channels"] not in {1, 2, None}:
-        warnings.append(f"Unexpected output channels: {facts['output_channels']}; expected 1 or 2.")
-    if facts["model_input_size"] is None:
-        warnings.append("Input size not found; provide `preprocessor_config_path` to lock ONNX shape.")
-    if facts["normalization"] == "unknown":
-        warnings.append("Normalization unknown; provide preprocessor config or training metadata.")
-    facts["warnings"] = warnings
-    return facts
+
+def load_segformer_from_checkpoint(
+    checkpoint_path: str | Path,
+    *,
+    hf_pretrained: str = HF_SEGFORMER_B5,
+    num_labels: int = 2,
+) -> Any:
+    """Build HF SegFormer-B5 and load Lightning `model.*` weights."""
+    torch = _require_torch()
+    try:
+        from transformers import SegformerForSemanticSegmentation
+    except ImportError as exc:  # pragma: no cover
+        raise ImportError("Install pl-hot with `[train]` extras to load SegFormer weights.") from exc
+
+    model = SegformerForSemanticSegmentation.from_pretrained(
+        hf_pretrained,
+        num_labels=num_labels,
+        ignore_mismatched_sizes=True,
+    )
+    blob = torch.load(Path(checkpoint_path), map_location="cpu", weights_only=False)
+    state = _state_dict_from_checkpoint(blob)
+    stripped = {_strip_prefix(k): v for k, v in state.items() if not k.startswith("optimizer")}
+    missing, unexpected = model.load_state_dict(stripped, strict=False)
+    model.eval()
+    model._pl_hot_load = {"missing": list(missing), "unexpected": list(unexpected)}
+    return model

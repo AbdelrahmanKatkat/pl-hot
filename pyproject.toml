@@ -8,20 +8,23 @@ version = "0.1.0"
 description = "Reusable parking-lot segmentation helpers for HOT fAIr model onboarding."
 readme = "README.md"
 requires-python = ">=3.12"
+# Inference (fAIr serve image). No torch / transformers / onnxruntime here:
+# fAIr builds the ONNX session and passes it to predict_session().
 dependencies = [
-    "numpy>=1.26",
-    "Pillow>=10.0",
-    "pyproj>=3.6",
-    "rasterio>=1.3",
-    "shapely>=2.0",
+    "numpy>=1.26",    # decode logits → mask; preprocess NCHW array
+    "Pillow>=10.0",   # resize chips/masks
+    "pyproj>=3.6",    # chip CRS → EPSG:4326
+    "rasterio>=1.3",  # GeoTIFF I/O + mask → polygons
+    "shapely>=2.0",   # hole fill, simplify, GeoJSON geometries
 ]
 
 [project.optional-dependencies]
+# Training + checkpoint inspect + ONNX export only. Not installed at serve time.
 train = [
-    "onnx>=1.17",
-    "onnxscript>=0.1",
-    "torch>=2.2",
-    "transformers>=4.41",
+    "onnx>=1.17",           # validate / inline exported graph
+    "onnxscript>=0.1",      # torch.onnx.export(..., dynamo=True)
+    "torch>=2.2",           # train, load .ckpt, export
+    "transformers>=4.41",   # SegformerForSemanticSegmentation
 ]
 test = [
     "pytest>=8.0",

@@ -10,22 +10,11 @@ def export_onnx_bytes(model: Any, model_input_size: int = 512) -> bytes:
     try:
         import onnx
         import torch
+        from .onnx_adapter import LogitsOnly
     except ImportError as exc:  # pragma: no cover - depends on optional extras
         raise ImportError("Install pl-hot with `[train]` extras for ONNX export support.") from exc
 
-    class _LogitsOnly(torch.nn.Module):
-        def __init__(self, wrapped: Any) -> None:
-            super().__init__()
-            self.wrapped = wrapped
-
-        def forward(self, x: torch.Tensor) -> torch.Tensor:
-            try:
-                out = self.wrapped(pixel_values=x)
-            except TypeError:
-                out = self.wrapped(x)
-            return out.logits if hasattr(out, "logits") else out
-
-    model = _LogitsOnly(model).cpu().eval()
+    model = LogitsOnly(model).cpu().eval()
     dummy = torch.randn(1, 3, model_input_size, model_input_size)
     with tempfile.TemporaryDirectory() as tmpdir:
         onnx_path = Path(tmpdir) / "model.onnx"

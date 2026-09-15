@@ -59,7 +59,7 @@ def mask_to_feature_collection(
     cfg: PostprocessParams,
     *,
     source_name: str | None = None,
-    class_name: str = "parking",
+    class_name: str = "parking_lot",
     probability: np.ndarray | None = None,
 ) -> dict[str, Any]:
     """Convert a binary model-space mask to cleaned EPSG:4326 GeoJSON."""
