@@ -2,10 +2,6 @@
 
 Python library for the HOT **parking-lot segmenter** on fAIr. It owns the model logic — RGB chip preprocessing, ONNX mask decode, polygon cleanup, georeferencing, GeoJSON output, and SegFormer train/export helpers — so the fAIr model pack stays a thin STAC/ZenML/Docker adapter.
 
-This README is the **implementation contract**. Do not put ZenML, STAC, or Docker orchestration in this library. Architecture and metric theory live in [`model/model.md`](model/model.md).
-
-**Python:** ≥ 3.12
-
 ---
 
 ## What it is
