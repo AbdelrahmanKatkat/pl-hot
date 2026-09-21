@@ -222,7 +222,7 @@ STAC: `mlm:tasks=["semantic-segmentation"]`, `mlm:accelerator=cuda`, input shape
 
 ## Checkpoint (read the published file, then freeze the contract)
 
-`checkpoint.py` **reads** a Lightning/HF SegFormer `.ckpt`. It is not TerraTorch, TorchGeo, or [qubvel/segmentation_models](https://github.com/qubvel/segmentation_models) (Keras). Those stacks use different module names and will not load this state dict.
+`checkpoint.py` **reads** a Lightning/HF SegFormer `.ckpt`. 
 
 The local file is `model/SegFormer_large_parking.ckpt`. Keys are `model.segformer.encoder.*` and `model.decode_head.classifier.*` (Hugging Face `SegformerForSemanticSegmentation` inside PyTorch Lightning).
 
@@ -250,16 +250,12 @@ A `.ckpt` filename is not `.zip`, but Lightning stores it as a zip of pickle + s
 
 Tile size 512 and ImageNet norm are not in the weight file. They come from the paper / HF SegFormer-B5 card.
 
-### MiT-B5 vs fAIr live inference
-
-fAIr does not ban B5. Live serve is **CPU ONNX** in a distroless image. B5 is larger than the paper’s MiT-B0 table row (~80M vs ~4M params), so KNative cold start and CPU latency will be higher. Plan STAC `fair:memory_request` / `fair:memory_limit` in the several-GiB band. Training stays CUDA when a GPU is visible.
 
 ---
 
 ## Install and test
 
 ```bash
-cd fair_models/parking_lot/pl-hot
 uv venv && source .venv/bin/activate
 uv pip install -e ".[test]"
 uv pip install -e ".[train,test]"   # Torch / transformers / onnx
@@ -275,19 +271,6 @@ Current local suite:
 - `test_evaluate.py` - PW/mIoU metric mapping to `fair:*`
 - `test_serve.py` - end-to-end `predict_session` behavior with a fake ONNX session
 - `test_checkpoint.py` - MiT-B5 depth inference from state-dict keys
-
----
-
-## fAIr integration (thin adapter)
-
-```python
-from pl_hot.serve import predict_session
-
-def predict(session, input_images, params):
-    return predict_session(session, input_images, params)
-```
-
-fAIr owns STAC, ZenML, Docker, and `load_session`. `pl-hot` owns everything after the ONNX session exists.
 
 ---
 
