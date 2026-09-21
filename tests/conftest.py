@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 import numpy as np
@@ -13,12 +14,13 @@ def chips_dir(tmp_path: Path) -> Path:
     root.mkdir()
     transform = from_origin(500000, 1000, 1, 1)
 
-    for i in range(3):
+    # x=0,8,16 → three (x//4) blocks so spatial_split can fill both train and val.
+    for i, tile_x in enumerate((0, 8, 16)):
         arr = np.zeros((3, 32, 32), dtype=np.uint8)
         arr[0, 8:20, 8:20] = 200 + i
         arr[1, 8:20, 8:20] = 150
         arr[2, 8:20, 8:20] = 100
-        p = root / f"OAM-{i:04d}-0000-18.tif"
+        p = root / f"OAM-{tile_x:04d}-0000-18.tif"
         with rasterio.open(
             p,
             "w",
@@ -55,5 +57,5 @@ def labels_dir(tmp_path: Path) -> Path:
             }
         ],
     }
-    (root / "labels.geojson").write_text(__import__("json").dumps(geojson), encoding="utf-8")
+    (root / "labels.geojson").write_text(json.dumps(geojson), encoding="utf-8")
     return root

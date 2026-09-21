@@ -17,3 +17,13 @@ def test_decode_two_channel_logits() -> None:
     logits[0, 1, :, :] = 3.0
     mask, _ = decode_segformer_onnx_output(logits, threshold=0.5)
     assert int(mask.sum()) == 4
+
+
+def test_decode_upsamples_logits_to_spatial_size() -> None:
+    logits = np.full((1, 1, 2, 2), -10.0, dtype=np.float32)
+    logits[0, 0, 0, 0] = 10.0
+    mask, prob = decode_segformer_onnx_output(logits, threshold=0.5, spatial_size=8)
+    assert mask.shape == (8, 8)
+    assert prob.shape == (8, 8)
+    assert int(mask[0, 0]) == 1
+    assert int(mask.sum()) >= 1

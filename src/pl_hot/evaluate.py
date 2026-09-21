@@ -11,6 +11,7 @@ from typing import Any
 import numpy as np
 from PIL import Image
 
+from .dataset import list_chip_paths
 from .decode import decode_segformer_onnx_output
 from .params import PreprocessParams
 from .preprocess import preprocess_chip_for_onnx
@@ -54,12 +55,7 @@ def _metrics_from_confusion(tp: int, tn: int, fp: int, fn: int) -> dict[str, flo
 
 
 def evaluate_binary_masks(pred_masks_dir: str | Path, gt_masks_dir: str | Path) -> dict[str, float]:
-    """Dataset-level PW and 2-class mIoU from PNG mask folders.
-
-    Returns keys for `pipeline.py` `evaluate_model` → `log_evaluation_results`:
-    `accuracy`, `mean_iou`, and when defined `iou_background`, `iou_parking_lot`
-    (fAIr per-class IoU names from `classification:classes`).
-    """
+    """Dataset-level PW (aAcc) and 2-class mIoU from PNG mask folders."""
     pred_dir = Path(pred_masks_dir)
     gt_dir = Path(gt_masks_dir)
     gt_files = sorted(gt_dir.glob("*.png"))
@@ -119,17 +115,22 @@ def evaluate_segformer(
     threshold: float = 0.5,
     preprocess_cfg: PreprocessParams | None = None,
 ) -> dict[str, float]:
-    """Run the torch model on chips and score **raw** pixel masks (no polygon postprocess)."""
+    """Run the torch model on chips and score **raw** pixel masks (no polygon postprocess).
+
+    Logits are bilinear-upsampled to `model_input_size` (train grid), thresholded,
+    then nearest-unscaled to the native GT mask — the same two resizes as serve.
+    """
     torch, F = _require_torch()
     model = model.eval()
     pp = preprocess_cfg or PreprocessParams()
-    chips = sorted(list(Path(images_dir).glob("*.tif")) + list(Path(images_dir).glob("*.tiff")))
+    chips = list_chip_paths(images_dir)
     if not chips:
         raise ValueError(f"No chips found in {images_dir}")
 
     preds_tmp = Path(masks_dir).parent / "_pred_masks_tmp"
     preds_tmp.mkdir(parents=True, exist_ok=True)
     produced = 0
+    model_hw = (int(pp.model_input_size), int(pp.model_input_size))
     with torch.no_grad():
         for chip in chips:
             gt_path = Path(masks_dir) / f"{chip.stem}.png"
@@ -139,10 +140,17 @@ def evaluate_segformer(
             x = torch.tensor(x_np, dtype=torch.float32)
             out = model(pixel_values=x)
             logits = out.logits if hasattr(out, "logits") else out
-            gt_arr = np.asarray(Image.open(gt_path).convert("L"))
-            logits = F.interpolate(logits, size=gt_arr.shape, mode="bilinear", align_corners=False)
+            # Same grid as train loss: bilinear logits → model_input_size, then threshold.
+            logits = F.interpolate(logits, size=model_hw, mode="bilinear", align_corners=False)
             park_logits = _parking_logits_from_model_output(logits)
             mask, _ = decode_segformer_onnx_output(park_logits, threshold=threshold)
+            gt_arr = np.asarray(Image.open(gt_path).convert("L"))
+            gt_h, gt_w = gt_arr.shape[:2]
+            # Same unscale as serve: nearest model-space mask → native chip (map space).
+            if mask.shape != (gt_h, gt_w):
+                mask = np.asarray(
+                    Image.fromarray((mask > 0).astype(np.uint8) * 255, mode="L").resize((gt_w, gt_h), Image.NEAREST)
+                )
             Image.fromarray((mask > 0).astype(np.uint8) * 255, mode="L").save(preds_tmp / gt_path.name)
             produced += 1
     if produced == 0:

@@ -1,16 +1,23 @@
 """Prepare segmentation datasets from chips + one GeoJSON labels file."""
 
 import re
+import shutil
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 from PIL import Image
 
-from .geo_to_mask import rasterize_labels_for_chip
+from .geo_to_mask import load_label_collection, rasterize_labels_for_chip
 from .params import SplitParams
 
 OAM_TILE_RE = re.compile(r"^OAM-(\d+)-(\d+)-(\d+)\.(tif|tiff|png|jpg|jpeg)$", re.IGNORECASE)
+
+
+def list_chip_paths(root: str | Path) -> list[Path]:
+    """GeoTIFF chips only. Inference also accepts png/jpeg via serve."""
+    folder = Path(root)
+    return sorted(p for p in [*folder.glob("*.tif"), *folder.glob("*.tiff")] if p.is_file())
 
 
 def spatial_split(
@@ -56,18 +63,44 @@ def _find_labels_geojson(labels_dir: str | Path) -> Path:
     return matches[0]
 
 
+def _copy_chip_with_sidecars(src: Path, dst: Path) -> None:
+    """Copy or symlink a GeoTIFF plus GDAL world/projection sidecars if present."""
+    try:
+        dst.symlink_to(src.resolve())
+    except OSError:
+        shutil.copy2(src, dst)
+
+    for ext in (".aux.xml", ".tfw", ".prj"):
+        sidecar = src.parent / (src.name + ext)
+        if not sidecar.exists():
+            sidecar = src.parent / (src.stem + ext)
+        if not sidecar.exists():
+            continue
+        out_sidecar = dst.parent / sidecar.name
+        try:
+            out_sidecar.symlink_to(sidecar.resolve())
+        except OSError:
+            shutil.copy2(sidecar, out_sidecar)
+
+
 def prepare_seg_dataset_from_geojson(
     chips_dir: str | Path,
     labels_dir: str | Path,
     out_dir: str | Path,
     split_cfg: SplitParams,
 ) -> dict[str, Any]:
-    """Create image/mask train-val folders and return split metadata."""
+    """Create image/mask train-val folders and return split metadata.
+
+    Masks are burned at the chip's native height×width so pixels stay on the
+    GeoTIFF affine. `train_segformer` resizes RGB bilinear and labels nearest
+    to `model_input_size`; do not bake that resize into these PNGs.
+    """
     chips_root = Path(chips_dir)
     out_root = Path(out_dir)
     labels_geojson = _find_labels_geojson(labels_dir)
+    geometries, labels_crs = load_label_collection(labels_geojson)
 
-    chip_paths = sorted(list(chips_root.glob("*.tif")) + list(chips_root.glob("*.tiff")))
+    chip_paths = list_chip_paths(chips_root)
     if len(chip_paths) < 2:
         raise ValueError("Need at least 2 chips for train/val split")
 
@@ -77,6 +110,11 @@ def prepare_seg_dataset_from_geojson(
         split_cfg.split_seed,
         block_size=split_cfg.block_size,
     )
+    if not train_names or not val_names:
+        raise ValueError(
+            "Spatial split left train or val empty. Need OAM chips in at least "
+            "two (x//block_size, y//block_size) blocks so a whole block can be held out."
+        )
 
     for split_name, names in (("train", train_names), ("val", val_names)):
         img_dir = out_root / split_name / "images"
@@ -87,9 +125,16 @@ def prepare_seg_dataset_from_geojson(
         for name in names:
             src = chips_root / name
             dst = img_dir / name
-            dst.write_bytes(src.read_bytes())
-            mask = rasterize_labels_for_chip(labels_geojson, src)
-            Image.fromarray((np.asarray(mask) > 0).astype(np.uint8) * 255, mode="L").save(mask_dir / f"{src.stem}.png")
+            _copy_chip_with_sidecars(src, dst)
+            mask = rasterize_labels_for_chip(
+                labels_geojson,
+                src,
+                src_crs=labels_crs,
+                geometries=geometries,
+            )
+            Image.fromarray((np.asarray(mask) > 0).astype(np.uint8) * 255, mode="L").save(
+                mask_dir / f"{src.stem}.png"
+            )
 
     return {
         "strategy": "spatial",
@@ -101,4 +146,5 @@ def prepare_seg_dataset_from_geojson(
         "train_chip_names": train_names,
         "val_chip_names": val_names,
         "labels_geojson": str(labels_geojson),
+        "labels_crs": labels_crs,
     }

@@ -28,7 +28,11 @@ def predict_session(session: Any, input_images: str | Path, params: dict[str, An
     for img_path in iter_image_paths(input_images):
         batch, meta = preprocess_chip_for_onnx(img_path, preprocess_cfg)
         output = session.run(None, {input_name: batch})[0]
-        mask, prob = decode_segformer_onnx_output(output, threshold=inf_cfg.mask_threshold)
+        mask, prob = decode_segformer_onnx_output(
+            output,
+            threshold=inf_cfg.mask_threshold,
+            spatial_size=preprocess_cfg.model_input_size,
+        )
         fc = mask_to_feature_collection(
             mask,
             meta,

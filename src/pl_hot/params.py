@@ -35,7 +35,7 @@ class TrainParams:
     freeze_encoder: bool = True
     sample_fraction: float = 1.0
     model_input_size: int = 512
-    device: str = "cpu"
+    device: str = "auto"  # cuda if visible, else cpu
 
 
 @dataclass(frozen=True)

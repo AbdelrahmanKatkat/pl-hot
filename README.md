@@ -75,9 +75,10 @@ chips/ (RGB GeoTIFF) + labels/ (one .geojson of parking polygons)
     ▼
 prepare_seg_dataset_from_geojson()
     │  spatial split (OAM-{x}-{y}-{z} tile blocks)
-    │  rasterize polygons onto each chip (0/1 mask)
+    │  rasterize polygons onto each chip at **native HxW** (georef-aligned 0/1 PNG)
     ▼
 train_segformer()              fine-tune from HF / best_model.ckpt
+    │                          RGB bilinear + mask nearest → model_input_size (default 512)
     │                          BCE-with-logits, pos_weight ≈ 4.76
     │                          device = cuda if visible else cpu
     ▼
@@ -87,7 +88,7 @@ evaluate_segformer()           PW + mIoU → fAIr metric names ("accuracy", "mea
 export_onnx_bytes()            validated ONNX for promotion
 ```
 
-Labels stay polygons rasterized onto chips. Do not convert them to detection box files.
+Labels stay polygons rasterized onto chips at native resolution. Do not convert them to detection box files, and do not bilinear-resize the mask PNGs (that mixes class ids). Train-time nearest resize is the only label resample.
 
 ---
 
