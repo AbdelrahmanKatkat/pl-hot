@@ -14,7 +14,13 @@ import re
 from pathlib import Path
 from typing import Any
 
-HF_SEGFORMER_B5 = "nvidia/segformer-b5-finetuned-ade-512-512"
+# Config source for MiT-B5 SegFormer. Note: this does **not** pin input size; we still
+# train/export at 512 by default. We only need a correct architecture config.
+#
+# We vendor a minimal config JSON in `pl_hot/assets/` to avoid network access in
+# common workflows (exporting a local `.ckpt` to ONNX).
+HF_SEGFORMER_B5 = "nvidia/segformer-b5-finetuned-ade-640-640"
+_BUNDLED_B5_CONFIG = "segformer_b5_ade_640_config.min.json"
 
 _BLOCK_RE = re.compile(r"(?:^|\.)(?:model\.)?segformer\.encoder\.block\.(\d+)\.(\d+)\.")
 _PATCH_PROJ = "segformer.encoder.patch_embeddings.0.proj.weight"
@@ -103,15 +109,26 @@ def load_segformer_from_checkpoint(
     """Build HF SegFormer-B5 and load Lightning `model.*` weights."""
     torch = _require_torch()
     try:
-        from transformers import SegformerForSemanticSegmentation
+        from transformers import SegformerConfig, SegformerForSemanticSegmentation
     except ImportError as exc:  # pragma: no cover
         raise ImportError("Install pl-hot with `[train]` extras to load SegFormer weights.") from exc
 
-    model = SegformerForSemanticSegmentation.from_pretrained(
-        hf_pretrained,
-        num_labels=num_labels,
-        ignore_mismatched_sizes=True,
-    )
+    # Avoid downloading the full HF weight blob.
+    # Prefer the bundled config to avoid network access. Fall back to HF if the
+    # package data is missing or the caller overrode `hf_pretrained`.
+    cfg = None
+    try:
+        import json
+        import importlib.resources as ir
+
+        raw = ir.files("pl_hot.assets").joinpath(_BUNDLED_B5_CONFIG).read_text(encoding="utf-8")
+        cfg = SegformerConfig.from_dict(json.loads(raw))
+    except Exception:
+        cfg = None
+    if cfg is None:
+        cfg = SegformerConfig.from_pretrained(hf_pretrained)
+    cfg.num_labels = int(num_labels)
+    model = SegformerForSemanticSegmentation(cfg)
     blob = torch.load(Path(checkpoint_path), map_location="cpu", weights_only=False)
     state = _state_dict_from_checkpoint(blob)
     stripped = {_strip_prefix(k): v for k, v in state.items() if not k.startswith("optimizer")}

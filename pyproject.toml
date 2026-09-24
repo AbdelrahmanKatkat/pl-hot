@@ -37,3 +37,6 @@ addopts = "-ra"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/pl_hot"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"src/pl_hot/assets/segformer_b5_ade_640_config.min.json" = "pl_hot/assets/segformer_b5_ade_640_config.min.json"
